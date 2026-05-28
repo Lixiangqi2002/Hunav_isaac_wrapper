@@ -15,10 +15,12 @@ __pycache__/
 *~
 
 # Runtime/local launch state
+.current_hunav_world
 src/config/last_launch_config.json
 
 # Isaac Sim world and robot assets are local-only. They are large and should not be pushed.
 src/worlds/*
+!src/worlds/.gitkeep
 src/config/robots/*.usd
 
 # Local Isaac assets copied next to helper packages should not be pushed.

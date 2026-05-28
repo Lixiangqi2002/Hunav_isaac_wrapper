@@ -1,4 +1,0 @@
-export HUNAV_WORLD="office"
-export HUNAV_CONFIG="office_agents.yaml"
-export HUNAV_MAP="/workspace/hunav_isaac_ws/src/Hunav_isaac_wrapper/src/maps/office.yaml"
-export HUNAV_NAV2_PARAMS="/workspace/hunav_isaac_ws/src/Hunav_isaac_wrapper/src/config/navigation_params/carter_navigation_params.yaml"
