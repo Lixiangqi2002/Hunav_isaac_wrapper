@@ -17,12 +17,9 @@ __pycache__/
 # Runtime/local launch state
 src/config/last_launch_config.json
 
-# Isaac Sim world assets are local-only. They are large and should not be pushed.
-src/worlds/
-src/worlds/*.usd
-src/worlds/*.usda
-src/worlds/*.usdc
-src/worlds/*.usd.bak
+# Isaac Sim world and robot assets are local-only. They are large and should not be pushed.
+src/worlds/*
+src/config/robots/*.usd
 
 # Local Isaac assets copied next to helper packages should not be pushed.
 seg_vis/*.usd
