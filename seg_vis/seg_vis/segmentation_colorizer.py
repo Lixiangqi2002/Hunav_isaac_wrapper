@@ -1,5 +1,6 @@
 import rclpy
 from rclpy.node import Node
+from rclpy.qos import QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import Image
 from cv_bridge import CvBridge
 import numpy as np
@@ -10,32 +11,45 @@ class SegmentationColorizer(Node):
         super().__init__('segmentation_colorizer')
 
         self.bridge = CvBridge()
+        qos = QoSProfile(depth=10, reliability=ReliabilityPolicy.RELIABLE)
 
         # -------------------------------
-        # Topics (hardcoded dual mapping)
+        # Topics
         # -------------------------------
-        self.instance_input = '/segmentation_instance'
-        self.instance_output = '/instance_segmentation_color'
+        self.declare_parameter('instance_inputs', ['/segmentation_instance'])
+        self.declare_parameter('instance_output', '/instance_segmentation_color')
+        self.declare_parameter('semantic_inputs', ['/segmentation_semantic'])
+        self.declare_parameter('semantic_output', '/semantic_segmentation_color')
 
-        self.semantic_input = '/segmentation_semantic'
-        self.semantic_output = '/semantic_segmentation_color'
+        self.instance_inputs = list(self.get_parameter('instance_inputs').value)
+        self.instance_output = self.get_parameter('instance_output').value
+        self.semantic_inputs = list(self.get_parameter('semantic_inputs').value)
+        self.semantic_output = self.get_parameter('semantic_output').value
+        self._seen_inputs = set()
 
         # -------------------------------
         # Subscribers
         # -------------------------------
-        self.sub_instance = self.create_subscription(
-            Image,
-            self.instance_input,
-            self.instance_callback,
-            10
-        )
+        self._subscriptions = []
+        for topic in self.instance_inputs:
+            self._subscriptions.append(
+                self.create_subscription(
+                    Image,
+                    topic,
+                    lambda msg, topic=topic: self.instance_callback(msg, topic),
+                    qos
+                )
+            )
 
-        self.sub_semantic = self.create_subscription(
-            Image,
-            self.semantic_input,
-            self.semantic_callback,
-            10
-        )
+        for topic in self.semantic_inputs:
+            self._subscriptions.append(
+                self.create_subscription(
+                    Image,
+                    topic,
+                    lambda msg, topic=topic: self.semantic_callback(msg, topic),
+                    qos
+                )
+            )
 
         # -------------------------------
         # Publishers
@@ -43,17 +57,19 @@ class SegmentationColorizer(Node):
         self.pub_instance = self.create_publisher(
             Image,
             self.instance_output,
-            10
+            qos
         )
 
         self.pub_semantic = self.create_publisher(
             Image,
             self.semantic_output,
-            10
+            qos
         )
 
-        self.get_logger().info(f'[Instance] {self.instance_input} -> {self.instance_output}')
-        self.get_logger().info(f'[Semantic] {self.semantic_input} -> {self.semantic_output}')
+        for topic in self.instance_inputs:
+            self.get_logger().info(f'[Instance] {topic} -> {self.instance_output}')
+        for topic in self.semantic_inputs:
+            self.get_logger().info(f'[Semantic] {topic} -> {self.semantic_output}')
 
     # ============================================================
     # Color mapping
@@ -90,17 +106,24 @@ class SegmentationColorizer(Node):
     # ============================================================
     # Callbacks
     # ============================================================
-    def instance_callback(self, msg: Image):
-        self.process_image(msg, self.pub_instance, tag="Instance")
+    def instance_callback(self, msg: Image, topic: str):
+        self.process_image(msg, self.pub_instance, tag="Instance", topic=topic)
 
-    def semantic_callback(self, msg: Image):
-        self.process_image(msg, self.pub_semantic, tag="Semantic")
+    def semantic_callback(self, msg: Image, topic: str):
+        self.process_image(msg, self.pub_semantic, tag="Semantic", topic=topic)
 
-    def process_image(self, msg: Image, publisher, tag=""):
+    def process_image(self, msg: Image, publisher, tag="", topic=""):
         """
         Convert segmentation image to colored image and publish.
         """
         try:
+            if topic and topic not in self._seen_inputs:
+                self._seen_inputs.add(topic)
+                self.get_logger().info(
+                    f'[{tag}] First frame from {topic}: '
+                    f'{msg.width}x{msg.height} {msg.encoding}'
+                )
+
             seg = self.bridge.imgmsg_to_cv2(msg, desired_encoding='passthrough')
             seg = np.array(seg)
 
