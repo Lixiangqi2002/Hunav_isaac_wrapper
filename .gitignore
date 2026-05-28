@@ -23,3 +23,6 @@ src/worlds/*.usd
 src/worlds/*.usda
 src/worlds/*.usdc
 src/worlds/*.usd.bak
+
+# Local Isaac assets copied next to helper packages should not be pushed.
+seg_vis/*.usd
