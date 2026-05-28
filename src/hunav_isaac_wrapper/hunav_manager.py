@@ -109,6 +109,8 @@ class HuNavManager:
         self.retarget_flag = False
         self.bound_animations = {}
         self.flag_anim = {}
+        self.scripted_agents = set()
+        self.agent_runtime_state = {}
         
         # Orientation smoothing
         self.agent_previous_orientations = {}  # Store previous orientations for smoothing
@@ -185,6 +187,19 @@ class HuNavManager:
         while value > math.pi:
             value -= 2 * math.pi
         return value
+
+    def _is_script_driven_agent(self, agent_cfg) -> bool:
+        """
+        Detect whether an agent should publish live pose state but skip HuNav SFM write-back.
+        """
+        if not isinstance(agent_cfg, dict):
+            return False
+        if bool(agent_cfg.get("script_driven", False)):
+            return True
+        if bool(agent_cfg.get("scripted", False)):
+            return True
+        control_mode = str(agent_cfg.get("control_mode", "")).strip().lower()
+        return control_mode in {"script", "scripted", "usd", "animation"}
 
     def initialize_hunav_nodes(self):
         process_1 = subprocess.Popen(
@@ -387,6 +402,8 @@ class HuNavManager:
             self.agent_initial_states.append(
                 {"position": global_pos, "orientation": global_rot}
             )
+            if self._is_script_driven_agent(agent_cfg):
+                self.scripted_agents.add(int(agent_cfg["id"]))
 
         # Set up the robot prim
         if self.robot_prim_path:
@@ -419,6 +436,8 @@ class HuNavManager:
         self.agent_initial_states.clear()
         self.animationDict.clear()
         self.agent_previous_orientations.clear()  # Clean up orientation tracking
+        self.scripted_agents.clear()
+        self.agent_runtime_state.clear()
 
     # Obstacle detection functions
     def generate_lasers(self, num_lasers: int) -> List[Gf.Vec3f]:
@@ -570,9 +589,11 @@ class HuNavManager:
     def _create_agent_msg(self, agent_prim, index):
         agent_ref = self.config["hunav_loader"]["ros__parameters"]["agents"][index]
         agent_cfg = self.config["hunav_loader"]["ros__parameters"][agent_ref]
+        agent_id = int(agent_cfg["id"])
+        is_script_driven = agent_id in self.scripted_agents
 
         agent = Agent()
-        agent.id = int(agent_cfg["id"])
+        agent.id = agent_id
         agent.type = Agent.PERSON
         if self.config["hunav_loader"]["ros__parameters"]["simulator"] == "Gazebo":
             agent.skin = agent_cfg["skin"]
@@ -603,8 +624,29 @@ class HuNavManager:
         agent.yaw = self.normalize_angle(yaw - math.pi / 2.0)
 
         # Velocities
+        now_time = self.node.get_clock().now().nanoseconds * 1e-9
         lin = agent_prim.GetAttribute("physics:velocity").Get()
         ang = agent_prim.GetAttribute("physics:angularVelocity").Get()
+        if is_script_driven:
+            state = self.agent_runtime_state.get(agent_id)
+            lin = Gf.Vec3d(0.0, 0.0, 0.0)
+            ang = Gf.Vec3d(0.0, 0.0, 0.0)
+            if state is not None:
+                dt = now_time - state["time"]
+                if dt > 1e-6:
+                    prev_pos = state["position"]
+                    lin = Gf.Vec3d(
+                        (float(pos[0]) - prev_pos[0]) / dt,
+                        (float(pos[1]) - prev_pos[1]) / dt,
+                        (float(pos[2]) - prev_pos[2]) / dt,
+                    )
+                    yaw_rate = self.normalize_angle(agent.yaw - state["yaw"]) / dt
+                    ang = Gf.Vec3d(0.0, 0.0, yaw_rate)
+            self.agent_runtime_state[agent_id] = {
+                "time": now_time,
+                "position": (float(pos[0]), float(pos[1]), float(pos[2])),
+                "yaw": agent.yaw,
+            }
         agent.linear_vel = float(np.linalg.norm(lin))
         agent.angular_vel = float(np.linalg.norm(ang))
         agent.velocity.linear.x = float(lin[0])
@@ -719,6 +761,8 @@ class HuNavManager:
     def _update_agents(self, updated_agents):
         for upd in updated_agents.agents:
             idx = upd.id - 1
+            if upd.id in self.scripted_agents:
+                continue
             agent_prim = self.agents[idx]
             agent_skelroot_prim = self.stage.GetPrimAtPath(
                 agent_prim.GetPath().AppendChild("Animation")
@@ -816,8 +860,8 @@ class HuNavManager:
 
             # Set animation based on agent's speed
             speed = np.linalg.norm(lin)
-            max_expected_speed = 1.5
-            normalized_speed = np.clip(speed / max_expected_speed, 0.0, 1.0)
+            max_expected_speed = 1.0
+            normalized_speed = np.clip(speed / max_expected_speed, 0.0, 0.5)
             if anim_graph_path:
                 set_anim_graph_speed(
                     self.stage, char, anim_graph_path, normalized_speed

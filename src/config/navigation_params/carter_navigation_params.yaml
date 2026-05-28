@@ -320,7 +320,7 @@ global_costmap:
 map_server:
   ros__parameters:
     use_sim_time: True
-    yaml_filename: "carter_warehouse_navigation.yaml"
+    yaml_filename: ""
 
 map_saver:
   ros__parameters:
@@ -392,4 +392,3 @@ waypoint_follower:
       plugin: "nav2_waypoint_follower::WaitAtWaypoint"
       enabled: True
       waypoint_pause_duration: 200
-

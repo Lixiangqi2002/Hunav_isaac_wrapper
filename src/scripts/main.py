@@ -635,8 +635,15 @@ def interactive_config_selection():
             
             try:
                 print_info("Starting RViz2 panel in background...")
+                map_path = os.path.join(BASE_WRAPPER, "maps", f"{world}.yaml")
+                rviz_cmd = ["ros2", "launch", "hunav_rviz2_panel", "hunav_rviz2_launch.py"]
+                if os.path.exists(map_path):
+                    rviz_cmd.extend([f"map:={map_path}"])
+                else:
+                    print_warning(f"Map YAML not found for world '{world}': {map_path}")
+
                 rviz_process = subprocess.Popen(
-                    ["ros2", "launch", "hunav_rviz2_panel", "hunav_rviz2_launch.py"],
+                    rviz_cmd,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
                     preexec_fn=os.setsid,

@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<profiles xmlns="http://www.eprosima.com/XMLSchemas/fastRTPS_Profiles">
+  <transport_descriptors>
+    <transport_descriptor>
+      <transport_id>CustomUdpTransport</transport_id>
+      <type>UDPv4</type>
+      <sendBufferSize>25165824</sendBufferSize>
+      <receiveBufferSize>25165824</receiveBufferSize>
+      <maxMessageSize>65000</maxMessageSize>
+    </transport_descriptor>
+  </transport_descriptors>
+
+  <participant profile_name="CustomUdpParticipant" is_default_profile="true">
+    <rtps>
+      <userTransports>
+        <transport_id>CustomUdpTransport</transport_id>
+      </userTransports>
+      <useBuiltinTransports>false</useBuiltinTransports>
+    </rtps>
+  </participant>
+</profiles>
+
+<!-- <?xml version="1.0" encoding="UTF-8" ?>
+<profiles xmlns="http://www.eprosima.com/XMLSchemas/fastRTPS_Profiles">
+    <transport_descriptors>
+        <transport_descriptor>
+            <transport_id>CustomUdpTransport</transport_id>
+            <type>UDPv4</type>
+            <sendSocketBufferSize>25165824</sendSocketBufferSize>
+            <receiveSocketBufferSize>25165824</receiveSocketBufferSize>
+            <maxMessageSize>65000</maxMessageSize>
+        </transport_descriptor>
+    </transport_descriptors>
+ 
+    <participant profile_name="CustomUdpParticipant" is_default_profile="true">
+        <rtps>
+            <userTransports>
+                <transport_id>CustomUdpTransport</transport_id>
+            </userTransports>
+            <useBuiltinTransports>true</useBuiltinTransports>
+        </rtps>
+    </participant>
+</profiles>
+ 
+export FASTRTPS_DEFAULT_PROFILES_FILE=/data/code/hunavsim_docker/isaac_sim/hunav_isaac_ws/src/Hunav_isaac_wrapper/fastdds.xml -->
