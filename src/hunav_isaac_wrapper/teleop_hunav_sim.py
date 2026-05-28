@@ -33,8 +33,12 @@ except ImportError:
 from rclpy.node import Node
 from geometry_msgs.msg import Twist
 from geometry_msgs.msg import PointStamped
+from geometry_msgs.msg import Pose
+from geometry_msgs.msg import PoseArray
 from geometry_msgs.msg import PoseStamped
 from std_msgs.msg import String
+from visualization_msgs.msg import Marker
+from visualization_msgs.msg import MarkerArray
 from isaacsim.core.api import World
 from isaacsim.storage.native import get_assets_root_path
 from isaacsim.robot.wheeled_robots.robots import WheeledRobot
@@ -101,6 +105,12 @@ DEFAULT_GT_IMAGE_HEIGHT = 480
 DEFAULT_GT_PUBLISH_EVERY_N_STEPS = 2
 DEFAULT_GT_OCCLUSION_OVERLAP_THRESHOLD = 0.7
 DEFAULT_GT_OCCLUSION_DEPTH_MARGIN = 0.2
+DEFAULT_CHOIS_STATE_TOPIC = "/chois/state"
+DEFAULT_CHOIS_HUMAN_POSES_TOPIC = "/chois/human_poses"
+DEFAULT_CHOIS_OBJECT_POSES_TOPIC = "/chois/object_poses"
+DEFAULT_CHOIS_MARKERS_TOPIC = "/chois/markers"
+DEFAULT_CHOIS_FRAME_ID = "map"
+DEFAULT_CHOIS_PUBLISH_EVERY_N_STEPS = 1
 
 def find_package_share_directory():
     """
@@ -241,6 +251,10 @@ class TeleopHuNavSim(Node):
                 animated_entry["placement"],
             )
             self.custom_animated_actors.append(actor_prim)
+            if animated_entry["prim_path"] in self.custom_animated_assets:
+                self.custom_animated_assets[animated_entry["prim_path"]]["asset_key"] = (
+                    animated_entry["asset_key"]
+                )
             if self.enable_chois_debug_visualization:
                 self._initialize_custom_animated_debug(actor_prim, animated_entry)
 
@@ -374,6 +388,7 @@ class TeleopHuNavSim(Node):
             ),
         )
         self.gt_publish_step_counter = 0
+        self.chois_publish_step_counter = 0
         self.gt_occlusion_overlap_threshold = float(
             os.environ.get(
                 "HUNAV_GT_OCCLUSION_OVERLAP_THRESHOLD",
@@ -412,6 +427,62 @@ class TeleopHuNavSim(Node):
             self.get_logger().info(
                 f"Publishing rear-left GT visible objects on {self.gt_visible_objects_rear_topic} "
                 f"using camera prim {self.gt_rear_camera_prim_path}"
+            )
+        self.chois_state_topic = os.environ.get(
+            "HUNAV_CHOIS_STATE_TOPIC",
+            DEFAULT_CHOIS_STATE_TOPIC,
+        )
+        self.chois_human_poses_topic = os.environ.get(
+            "HUNAV_CHOIS_HUMAN_POSES_TOPIC",
+            DEFAULT_CHOIS_HUMAN_POSES_TOPIC,
+        )
+        self.chois_object_poses_topic = os.environ.get(
+            "HUNAV_CHOIS_OBJECT_POSES_TOPIC",
+            DEFAULT_CHOIS_OBJECT_POSES_TOPIC,
+        )
+        self.chois_markers_topic = os.environ.get(
+            "HUNAV_CHOIS_MARKERS_TOPIC",
+            DEFAULT_CHOIS_MARKERS_TOPIC,
+        )
+        self.chois_frame_id = os.environ.get(
+            "HUNAV_CHOIS_FRAME_ID",
+            DEFAULT_CHOIS_FRAME_ID,
+        )
+        self.chois_publish_every_n_steps = max(
+            1,
+            int(
+                os.environ.get(
+                    "HUNAV_CHOIS_PUBLISH_EVERY_N_STEPS",
+                    str(DEFAULT_CHOIS_PUBLISH_EVERY_N_STEPS),
+                )
+            ),
+        )
+        self.chois_state_pub = self.create_publisher(
+            String,
+            self.chois_state_topic,
+            10,
+        )
+        self.chois_human_poses_pub = self.create_publisher(
+            PoseArray,
+            self.chois_human_poses_topic,
+            10,
+        )
+        self.chois_object_poses_pub = self.create_publisher(
+            PoseArray,
+            self.chois_object_poses_topic,
+            10,
+        )
+        self.chois_markers_pub = self.create_publisher(
+            MarkerArray,
+            self.chois_markers_topic,
+            10,
+        )
+        if self.custom_animated_assets:
+            self.get_logger().info(
+                f"Publishing CHOIS state on {self.chois_state_topic}, "
+                f"poses on {self.chois_human_poses_topic} and "
+                f"{self.chois_object_poses_topic}, markers on "
+                f"{self.chois_markers_topic}"
             )
 
         # Setup HuNavManager
@@ -1562,6 +1633,155 @@ class TeleopHuNavSim(Node):
                 self.gt_rear_camera_prim_path,
             )
 
+    def _make_pose_from_xyz(self, xyz):
+        pose = Pose()
+        pose.position.x = float(xyz[0])
+        pose.position.y = float(xyz[1])
+        pose.position.z = float(xyz[2])
+        pose.orientation.w = 1.0
+        return pose
+
+    def _collect_chois_entity_state(self):
+        if not self.custom_animated_assets:
+            return []
+
+        entities = []
+        time_code = self._get_current_animation_time_code()
+        bbox_cache = UsdGeom.BBoxCache(
+            time_code,
+            [UsdGeom.Tokens.default_, UsdGeom.Tokens.render, UsdGeom.Tokens.proxy],
+            useExtentsHint=True,
+        )
+
+        def add_entity(asset_key, entity_type, prim):
+            if prim is None or not prim.IsValid():
+                return
+            aligned = bbox_cache.ComputeWorldBound(prim).ComputeAlignedBox()
+            if aligned.IsEmpty():
+                return
+            center = aligned.GetMidpoint()
+            extent = aligned.GetSize()
+            min_pt = aligned.GetMin()
+            entities.append(
+                {
+                    "asset_key": asset_key,
+                    "type": entity_type,
+                    "prim_path": str(prim.GetPath()),
+                    "position": [
+                        float(center[0]),
+                        float(center[1]),
+                        float(center[2]),
+                    ],
+                    "ground_position": [
+                        float(center[0]),
+                        float(center[1]),
+                        float(min_pt[2]),
+                    ],
+                    "bbox_extent": [
+                        float(extent[0]),
+                        float(extent[1]),
+                        float(extent[2]),
+                    ],
+                }
+            )
+
+        for prim_path, asset_meta in sorted(self.custom_animated_assets.items()):
+            actor_prim = asset_meta.get("actor_prim")
+            if actor_prim is None or not actor_prim.IsValid():
+                continue
+            asset_key = asset_meta.get("asset_key") or Path(prim_path).name
+            body_prim = self.world.stage.GetPrimAtPath(
+                f"{actor_prim.GetPath()}/Armature_1/body_1"
+            )
+            object_prim = self.world.stage.GetPrimAtPath(
+                f"{actor_prim.GetPath()}/Animated_Object"
+            )
+            add_entity(asset_key, "human", body_prim if body_prim and body_prim.IsValid() else actor_prim)
+            add_entity(asset_key, "object", object_prim)
+
+        return entities
+
+    def _build_chois_marker(self, entity, marker_id, stamp):
+        marker = Marker()
+        marker.header.frame_id = self.chois_frame_id
+        marker.header.stamp = stamp
+        marker.ns = f"chois_{entity['type']}"
+        marker.id = marker_id
+        marker.action = Marker.ADD
+        marker.type = Marker.SPHERE if entity["type"] == "human" else Marker.CUBE
+        marker.pose = self._make_pose_from_xyz(entity["ground_position"])
+        marker.pose.position.z += 0.45 if entity["type"] == "human" else 0.20
+        marker.scale.x = 0.45 if entity["type"] == "human" else 0.35
+        marker.scale.y = 0.45 if entity["type"] == "human" else 0.35
+        marker.scale.z = 0.90 if entity["type"] == "human" else 0.35
+        if entity["type"] == "human":
+            marker.color.r = 1.0
+            marker.color.g = 0.55
+            marker.color.b = 0.05
+        else:
+            marker.color.r = 0.05
+            marker.color.g = 0.95
+            marker.color.b = 0.35
+        marker.color.a = 0.9
+        return marker
+
+    def _build_chois_label_marker(self, entity, marker_id, stamp):
+        marker = Marker()
+        marker.header.frame_id = self.chois_frame_id
+        marker.header.stamp = stamp
+        marker.ns = "chois_labels"
+        marker.id = marker_id
+        marker.action = Marker.ADD
+        marker.type = Marker.TEXT_VIEW_FACING
+        marker.pose = self._make_pose_from_xyz(entity["ground_position"])
+        marker.pose.position.z += 1.15 if entity["type"] == "human" else 0.65
+        marker.scale.z = 0.35
+        marker.color.r = 1.0
+        marker.color.g = 1.0
+        marker.color.b = 1.0
+        marker.color.a = 0.95
+        marker.text = f"{entity['asset_key']} {entity['type']}"
+        return marker
+
+    def _publish_chois_state(self):
+        entities = self._collect_chois_entity_state()
+        stamp = self.get_clock().now().to_msg()
+
+        human_poses = PoseArray()
+        human_poses.header.frame_id = self.chois_frame_id
+        human_poses.header.stamp = stamp
+        object_poses = PoseArray()
+        object_poses.header.frame_id = self.chois_frame_id
+        object_poses.header.stamp = stamp
+
+        markers = MarkerArray()
+        delete_all = Marker()
+        delete_all.action = Marker.DELETEALL
+        markers.markers.append(delete_all)
+
+        for index, entity in enumerate(entities):
+            pose = self._make_pose_from_xyz(entity["ground_position"])
+            if entity["type"] == "human":
+                human_poses.poses.append(pose)
+            elif entity["type"] == "object":
+                object_poses.poses.append(pose)
+            markers.markers.append(self._build_chois_marker(entity, index, stamp))
+            markers.markers.append(self._build_chois_label_marker(entity, index + 1000, stamp))
+
+        payload = {
+            "stamp_sec": float(self.custom_animation_time_seconds or 0.0),
+            "frame_id": self.chois_frame_id,
+            "count": len(entities),
+            "entities": entities,
+        }
+        state_msg = String()
+        state_msg.data = json.dumps(payload, ensure_ascii=True)
+
+        self.chois_state_pub.publish(state_msg)
+        self.chois_human_poses_pub.publish(human_poses)
+        self.chois_object_poses_pub.publish(object_poses)
+        self.chois_markers_pub.publish(markers)
+
     def _build_debug_curve_points(self, points_xy, z_value):
         return [
             Gf.Vec3f(float(point[0]), float(point[1]), float(z_value))
@@ -2040,6 +2260,9 @@ class TeleopHuNavSim(Node):
                 self.gt_publish_step_counter += 1
                 if self.gt_publish_step_counter % self.gt_publish_every_n_steps == 0:
                     self._publish_gt_visible_objects()
+                self.chois_publish_step_counter += 1
+                if self.chois_publish_step_counter % self.chois_publish_every_n_steps == 0:
+                    self._publish_chois_state()
                 if self.enable_chois_debug_visualization:
                     self._sample_custom_animated_debug_paths()
                 self.hunav.send_agents_msg()
