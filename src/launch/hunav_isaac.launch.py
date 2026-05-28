@@ -4,12 +4,11 @@ Launch file for HuNav Isaac Wrapper simulation.
 Launches the main script using the ROS2 launcher, which handles Isaac Sim python detection.
 """
 
-import os
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, LogInfo, ExecuteProcess
 from launch.substitutions import LaunchConfiguration
 from launch.conditions import IfCondition, UnlessCondition
-from launch_ros.substitutions import FindPackageShare
+from launch_ros.actions import Node
 
 
 def generate_launch_description():
@@ -55,6 +54,13 @@ def generate_launch_description():
         output='screen',
         name='hunav_isaac_launcher_interactive'
     )
+
+    segmentation_colorizer = Node(
+        package='seg_vis',
+        executable='segmentation_colorizer',
+        name='segmentation_colorizer',
+        output='screen',
+    )
     
     return LaunchDescription([
         # Launch arguments
@@ -66,8 +72,10 @@ def generate_launch_description():
         LogInfo(msg=['Launching HuNav Isaac Wrapper...']),
         LogInfo(msg=['Use scenario parameter to specify a scenario file']),
         LogInfo(msg=['Otherwise interactive mode will start']),
+        LogInfo(msg=['Starting segmentation colorizer bridge...']),
         
-        # Launcher processes
+        # Bridge and launcher processes
+        segmentation_colorizer,
         launcher_with_scenario,
         launcher_interactive,
     ])
