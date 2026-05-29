@@ -117,6 +117,14 @@ def find_package_share_directory():
     Find the package share directory containing worlds, scenarios, config, etc.
     Works both in development and installed package modes.
     """
+    # Prefer the editable source tree when this module is imported from source.
+    # This keeps large USD world tweaks from being shadowed by an older install/.
+    current_file = Path(__file__)
+    if current_file.parent.parent.name == "src":
+        src_dir = current_file.parent.parent
+        if (src_dir / "worlds").exists():
+            return str(src_dir)
+
     # Try to find via ROS2 package first (installed mode)
     try:
         result = subprocess.run(
@@ -131,14 +139,6 @@ def find_package_share_directory():
         pass
     
     # Development mode fallback
-    current_file = Path(__file__)
-    
-    # Check if we're in src/hunav_isaac_wrapper/ (development mode)
-    if current_file.parent.parent.name == "src":
-        src_dir = current_file.parent.parent
-        if (src_dir / "worlds").exists():
-            return str(src_dir)
-    
     # Last fallback - check current working directory
     cwd = Path.cwd()
     if (cwd / "worlds").exists():
@@ -1244,6 +1244,58 @@ class TeleopHuNavSim(Node):
             return "person"
         semantic_aliases = [
             ("forklift", "forklift"),
+            ("ceilinglight", "light"),
+            ("wheelchair", "wheelchair"),
+            ("hospitalbed", "hospital_bed"),
+            ("bed", "hospital_bed"),
+            ("stretcher", "stretcher"),
+            ("doorwall", "wall"),
+            ("backwall", "wall"),
+            ("sidewall", "wall"),
+            ("wall", "wall"),
+            ("floor", "floor"),
+            ("ceiling", "ceiling"),
+            ("door", "door"),
+            ("window", "window"),
+            ("glass", "glass"),
+            ("sink", "sink"),
+            ("washbasin", "sink"),
+            ("toilet", "toilet"),
+            ("urinal", "urinal"),
+            ("cabinet", "cabinet"),
+            ("cupboard", "cabinet"),
+            ("filecabinet", "cabinet"),
+            ("papercase", "cabinet"),
+            ("dispenser", "dispenser"),
+            ("drinksmachine", "vending_machine"),
+            ("machine", "machine"),
+            ("bottle", "bottle"),
+            ("screen", "screen"),
+            ("monitor", "screen"),
+            ("tvdisplay", "screen"),
+            ("computer", "computer"),
+            ("keyboard", "keyboard"),
+            ("mouse", "mouse"),
+            ("printer", "printer"),
+            ("smartphone", "phone"),
+            ("phone", "phone"),
+            ("sign", "sign"),
+            ("pipe", "pipe"),
+            ("extinguisher", "extinguisher"),
+            ("smokedetector", "smoke_detector"),
+            ("cctv", "camera"),
+            ("picture", "picture"),
+            ("frame", "picture"),
+            ("clock", "clock"),
+            ("plant", "plant"),
+            ("vase", "vase"),
+            ("sofa", "sofa"),
+            ("bench", "bench"),
+            ("desk", "desk"),
+            ("desktable", "desk"),
+            ("reception", "reception"),
+            ("receptiontable", "reception"),
+            ("elevator", "elevator"),
             ("cart", "cart"),
             ("pallet", "pallet"),
             ("klt", "klt_bin"),
@@ -1256,6 +1308,19 @@ class TeleopHuNavSim(Node):
             ("wire", "wire"),
             ("rack", "rack"),
             ("shelf", "shelf"),
+            ("booksset", "book"),
+            ("book", "book"),
+            ("ringbinder", "binder"),
+            ("binder", "binder"),
+            ("pencilbox", "stationery_box"),
+            ("pencilcase", "stationery_box"),
+            ("pencil", "pencil"),
+            ("marker", "marker"),
+            ("feltpen", "marker"),
+            ("a4", "paper"),
+            ("paper", "paper"),
+            ("building", "building"),
+            ("personenleitsystem", "barrier"),
             ("beam", "beam"),
             ("bracketbeam", "beam"),
             ("table", "table"),
@@ -1313,12 +1378,13 @@ class TeleopHuNavSim(Node):
                 continue
             if not prim.IsA(UsdGeom.Xform):
                 continue
-            has_direct_mesh_child = False
+            has_direct_renderable_child = False
             for child in prim.GetChildren():
-                if child.IsA(UsdGeom.Mesh):
-                    has_direct_mesh_child = True
+                if child.IsA(UsdGeom.Mesh) or child.IsA(UsdGeom.Plane):
+                    has_direct_renderable_child = True
                     break
-            if not has_direct_mesh_child:
+            has_authored_reference = bool(prim.GetMetadata("references"))
+            if not has_direct_renderable_child and not has_authored_reference:
                 continue
             seen_paths.add(path)
             candidates.append(prim)
@@ -1392,6 +1458,8 @@ class TeleopHuNavSim(Node):
     def _apply_semantics_if_available(self, prim, semantic_label):
         if prim is None or not prim.IsValid() or not semantic_label:
             return
+        if prim.IsInstanceable():
+            prim.SetInstanceable(False)
         if add_update_semantics is None:
             return
         try:
