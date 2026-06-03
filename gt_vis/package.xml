@@ -1,0 +1,27 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypeName="packageFormat"?>
+<package format="3">
+  <name>gt_vis</name>
+  <version>0.1.0</version>
+  <description>RViz2 marker visualization for GT static and dynamic HuNav/CHOIS entities.</description>
+  <maintainer email="2107931860@qq.com">selina-xiangqi</maintainer>
+  <license>MIT</license>
+
+  <depend>rclpy</depend>
+  <depend>std_msgs</depend>
+  <depend>geometry_msgs</depend>
+  <depend>visualization_msgs</depend>
+  <depend>hunav_msgs</depend>
+
+  <exec_depend>python3-yaml</exec_depend>
+
+  <buildtool_depend>ament_python</buildtool_depend>
+
+  <test_depend>ament_copyright</test_depend>
+  <test_depend>ament_flake8</test_depend>
+  <test_depend>ament_pep257</test_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

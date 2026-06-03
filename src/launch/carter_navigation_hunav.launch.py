@@ -20,6 +20,7 @@ def _launch_setup(context, *args, **kwargs):
     map_file = LaunchConfiguration("map").perform(context)
     params_file = LaunchConfiguration("params_file").perform(context)
     map_topic = LaunchConfiguration("map_topic").perform(context)
+    rviz_config = LaunchConfiguration("rviz_config").perform(context)
     use_sim_time = LaunchConfiguration("use_sim_time")
 
     wrapper_share = get_package_share_directory("hunav_isaac_wrapper")
@@ -39,12 +40,21 @@ def _launch_setup(context, *args, **kwargs):
             "carter_navigation_params.yaml",
         )
 
-    rviz_config = os.path.join(carter_share, "rviz2", "carter_navigation.rviz")
+    if not rviz_config:
+        env_rviz_config = os.environ.get("HUNAV_RVIZ_CONFIG", "")
+        chois_rviz_config = "/workspace/hunav_isaac_ws/config/carter_navigation_hunav_chois.rviz"
+        if env_rviz_config:
+            rviz_config = env_rviz_config
+        elif os.path.exists(chois_rviz_config):
+            rviz_config = chois_rviz_config
+        else:
+            rviz_config = os.path.join(carter_share, "rviz2", "carter_navigation.rviz")
 
     return [
         LogInfo(msg=[f"HuNav Carter Navigation world: {world}"]),
         LogInfo(msg=[f"HuNav Carter Navigation map: {map_file}"]),
         LogInfo(msg=[f"HuNav Carter Navigation map topic: {map_topic}"]),
+        LogInfo(msg=[f"HuNav Carter Navigation RViz config: {rviz_config}"]),
         Node(
             package="rviz2",
             executable="rviz2",
@@ -120,6 +130,15 @@ def generate_launch_description():
                 "map_topic",
                 default_value="/nav2_map",
                 description="Topic used by Nav2 and RViz for the selected static map.",
+            ),
+            DeclareLaunchArgument(
+                "rviz_config",
+                default_value=EnvironmentVariable("HUNAV_RVIZ_CONFIG", default_value=""),
+                description=(
+                    "Full path to RViz config. Defaults to $HUNAV_RVIZ_CONFIG, "
+                    "/workspace/hunav_isaac_ws/config/carter_navigation_hunav_chois.rviz, "
+                    "or carter_navigation.rviz."
+                ),
             ),
             DeclareLaunchArgument(
                 "use_sim_time",

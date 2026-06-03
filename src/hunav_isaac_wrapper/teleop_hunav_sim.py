@@ -61,7 +61,6 @@ except ImportError:
 from .world_builder import WorldBuilder
 from .hunav_manager import HuNavManager
 
-scene = "hospital"
 root = "/data/code/hunavsim_docker"
 
 DEFAULT_CHOIS_ANIMATED_USD = (
@@ -72,9 +71,9 @@ DEFAULT_CHOIS_ANIMATED_USD_LOCAL = (
     "isaac_sim/hunav_isaac_ws/src/"
     f"{root}/animation_usd/sample_motion_001_with_cache.usd"
 )
-DEFAULT_CHOIS_ANIMATION_USD_ROOT = f"/workspace/hunav_isaac_ws/src/animation_usd/{scene}"
+DEFAULT_CHOIS_ANIMATION_USD_ROOT = "/workspace/hunav_isaac_ws/src/animation_usd"
 DEFAULT_CHOIS_ANIMATION_USD_ROOT_LOCAL = (
-    f"{root}/isaac_sim/hunav_isaac_ws/src/animation_usd/{scene}"
+    f"{root}/isaac_sim/hunav_isaac_ws/src/animation_usd"
 )
 DEFAULT_CHOIS_WAYPOINTS_NPY = (
     "/workspace/hunav_isaac_ws/src/animation_npy/chois_waypoints.npy"
@@ -83,9 +82,9 @@ DEFAULT_CHOIS_WAYPOINTS_NPY_LOCAL = (
     f"{root}/isaac_sim/hunav_isaac_ws/src/"
     "animation_npy/chois_waypoints.npy"
 )
-DEFAULT_CHOIS_ANIMATION_NPY_ROOT = f"/workspace/hunav_isaac_ws/src/animation_npy/{scene}"
+DEFAULT_CHOIS_ANIMATION_NPY_ROOT = "/workspace/hunav_isaac_ws/src/animation_npy"
 DEFAULT_CHOIS_ANIMATION_NPY_ROOT_LOCAL = (
-    f"{root}/isaac_sim/hunav_isaac_ws/src/animation_npy/{scene}"
+    f"{root}/isaac_sim/hunav_isaac_ws/src/animation_npy"
 )
 DEFAULT_CLICKED_POINTS_NPY = "/workspace/hunav_isaac_ws/src/animation_usd/rviz_clicked_points.npy"
 DEFAULT_GOAL_POSES_NPY = "/workspace/hunav_isaac_ws/src/animation_usd/rviz_goal_poses.npy"
@@ -500,25 +499,41 @@ class TeleopHuNavSim(Node):
         self.hunav.initialize_hunav_nodes()
 
     def _resolve_chois_animation_usd_root(self):
+        world = str(self.map_name or "").strip()
         candidates = [
             os.environ.get("HUNAV_CHOIS_ANIMATION_USD_ROOT"),
+            str(Path(DEFAULT_CHOIS_ANIMATION_USD_ROOT) / world) if world else None,
+            str(Path(DEFAULT_CHOIS_ANIMATION_USD_ROOT_LOCAL) / world) if world else None,
             DEFAULT_CHOIS_ANIMATION_USD_ROOT,
             DEFAULT_CHOIS_ANIMATION_USD_ROOT_LOCAL,
         ]
         for candidate in candidates:
-            if candidate and os.path.exists(candidate):
+            if not candidate:
+                continue
+            candidate_path = Path(candidate)
+            if world and (candidate_path / world / "usd").exists():
+                return str(candidate_path / world)
+            if (candidate_path / "usd").exists():
                 return candidate
         return None
 
     def _resolve_chois_animation_npy_root(self):
+        world = str(self.map_name or "").strip()
         candidates = [
             os.environ.get("HUNAV_CHOIS_ANIMATION_NPY_ROOT"),
+            str(Path(DEFAULT_CHOIS_ANIMATION_NPY_ROOT) / world) if world else None,
+            str(Path(DEFAULT_CHOIS_ANIMATION_NPY_ROOT_LOCAL) / world) if world else None,
             DEFAULT_CHOIS_ANIMATION_NPY_ROOT,
             DEFAULT_CHOIS_ANIMATION_NPY_ROOT_LOCAL,
         ]
         for candidate in candidates:
-            if candidate and os.path.exists(candidate):
-                return candidate
+            if not candidate:
+                continue
+            candidate_path = Path(candidate)
+            if world and (candidate_path / world).exists():
+                return str(candidate_path / world)
+            if candidate_path.exists():
+                return str(candidate_path)
         return None
 
     def _chois_asset_key_from_usd_path(self, usd_path: str):
@@ -993,7 +1008,11 @@ class TeleopHuNavSim(Node):
         if self.chois_animation_usd_root:
             usd_root = Path(self.chois_animation_usd_root) / "usd"
             if usd_root.exists():
-                usd_candidates = sorted(str(path) for path in usd_root.rglob("*.usd"))
+                usd_candidates = sorted(
+                    str(path)
+                    for path in usd_root.rglob("*.usd")
+                    if "_bad_" not in str(path) and "/debug/" not in str(path)
+                )
                 preferred_usd_candidates = [
                     path for path in usd_candidates if path.endswith("_with_cache.usd")
                 ]
@@ -1484,21 +1503,25 @@ class TeleopHuNavSim(Node):
         actor_label = self._semantic_name_from_prim(actor_prim)
         self._apply_semantics_if_available(actor_prim, actor_label)
 
-        body_prim = self.world.stage.GetPrimAtPath(
-            f"{actor_prim.GetPath()}/Armature_1/body_1"
-        )
+        body_prim = self._find_chois_child_prim(actor_prim, {"body_1"})
         if body_prim and body_prim.IsValid():
             self._apply_semantics_if_available(
                 body_prim, self._semantic_name_from_prim(body_prim)
             )
 
-        object_prim = self.world.stage.GetPrimAtPath(
-            f"{actor_prim.GetPath()}/Animated_Object"
-        )
+        object_prim = self._find_chois_child_prim(actor_prim, {"Animated_Object"})
         if object_prim and object_prim.IsValid():
             self._apply_semantics_if_available(
                 object_prim, self._semantic_name_from_prim(object_prim)
             )
+
+    def _find_chois_child_prim(self, actor_prim, names):
+        if actor_prim is None or not actor_prim.IsValid():
+            return None
+        for prim in Usd.PrimRange(actor_prim):
+            if prim.GetName() in names:
+                return prim
+        return None
 
     def _compute_world_bbox(self, prim):
         bbox_cache = UsdGeom.BBoxCache(
@@ -1721,15 +1744,65 @@ class TeleopHuNavSim(Node):
             useExtentsHint=True,
         )
 
+        def animated_points_bbox(prim):
+            if prim is None or not prim.IsValid():
+                return None
+            xform_cache = UsdGeom.XformCache(time_code)
+            min_pt = np.array([np.inf, np.inf, np.inf], dtype=np.float64)
+            max_pt = np.array([-np.inf, -np.inf, -np.inf], dtype=np.float64)
+            found_points = False
+            for child in Usd.PrimRange(prim):
+                if child.GetTypeName() != "Mesh":
+                    continue
+                points_attr = child.GetAttribute("points")
+                if not points_attr:
+                    continue
+                points = points_attr.Get(time_code)
+                if not points:
+                    continue
+                local_to_world = xform_cache.GetLocalToWorldTransform(child)
+                for point in points:
+                    world_point = local_to_world.Transform(
+                        Gf.Vec3d(float(point[0]), float(point[1]), float(point[2]))
+                    )
+                    xyz = np.array(
+                        [
+                            float(world_point[0]),
+                            float(world_point[1]),
+                            float(world_point[2]),
+                        ],
+                        dtype=np.float64,
+                    )
+                    min_pt = np.minimum(min_pt, xyz)
+                    max_pt = np.maximum(max_pt, xyz)
+                    found_points = True
+            if not found_points:
+                return None
+            center = (min_pt + max_pt) * 0.5
+            extent = max_pt - min_pt
+            return {
+                "center": center,
+                "extent": extent,
+                "min": min_pt,
+            }
+
         def add_entity(asset_key, entity_type, prim):
             if prim is None or not prim.IsValid():
                 return
-            aligned = bbox_cache.ComputeWorldBound(prim).ComputeAlignedBox()
-            if aligned.IsEmpty():
-                return
-            center = aligned.GetMidpoint()
-            extent = aligned.GetSize()
-            min_pt = aligned.GetMin()
+            points_bbox = animated_points_bbox(prim) if entity_type == "human" else None
+            if points_bbox is not None:
+                center = points_bbox["center"]
+                extent = points_bbox["extent"]
+                min_pt = points_bbox["min"]
+                bbox_source = "animated_mesh_points"
+            else:
+                aligned = bbox_cache.ComputeWorldBound(prim).ComputeAlignedBox()
+                if aligned.IsEmpty():
+                    return
+                center = aligned.GetMidpoint()
+                extent = aligned.GetSize()
+                min_pt = aligned.GetMin()
+                bbox_source = "usd_bbox"
             entities.append(
                 {
                     "asset_key": asset_key,
@@ -1750,6 +1823,7 @@ class TeleopHuNavSim(Node):
                         float(extent[1]),
                         float(extent[2]),
                     ],
+                    "bbox_source": bbox_source,
                 }
             )
 
@@ -1758,12 +1832,8 @@ class TeleopHuNavSim(Node):
             if actor_prim is None or not actor_prim.IsValid():
                 continue
             asset_key = asset_meta.get("asset_key") or Path(prim_path).name
-            body_prim = self.world.stage.GetPrimAtPath(
-                f"{actor_prim.GetPath()}/Armature_1/body_1"
-            )
-            object_prim = self.world.stage.GetPrimAtPath(
-                f"{actor_prim.GetPath()}/Animated_Object"
-            )
+            body_prim = self._find_chois_child_prim(actor_prim, {"body_1"})
+            object_prim = self._find_chois_child_prim(actor_prim, {"Animated_Object"})
             add_entity(asset_key, "human", body_prim if body_prim and body_prim.IsValid() else actor_prim)
             add_entity(asset_key, "object", object_prim)
 

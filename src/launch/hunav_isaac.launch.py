@@ -61,6 +61,20 @@ def generate_launch_description():
         name='segmentation_colorizer',
         output='screen',
     )
+
+    gt_rviz_markers = Node(
+        package='gt_vis',
+        executable='gt_rviz_markers',
+        name='gt_rviz_markers',
+        output='screen',
+        parameters=[{
+            'world': '',
+            'marker_topic': '/gt/markers',
+            'chois_action_topic': '/gt/chois_actions',
+            'hunav_topic': 'human_states',
+            'chois_topic': '/chois/state',
+        }],
+    )
     
     return LaunchDescription([
         # Launch arguments
@@ -73,9 +87,11 @@ def generate_launch_description():
         LogInfo(msg=['Use scenario parameter to specify a scenario file']),
         LogInfo(msg=['Otherwise interactive mode will start']),
         LogInfo(msg=['Starting segmentation colorizer bridge...']),
+        LogInfo(msg=['Starting GT RViz marker bridge...']),
         
         # Bridge and launcher processes
         segmentation_colorizer,
+        gt_rviz_markers,
         launcher_with_scenario,
         launcher_interactive,
     ])
