@@ -13,6 +13,7 @@ import yaml
 import numpy as np
 import subprocess, signal
 from typing import Tuple, List, Optional
+from pathlib import Path
 
 # ROS messages
 import rclpy
@@ -115,6 +116,7 @@ class HuNavManager:
         # Orientation smoothing
         self.agent_previous_orientations = {}  # Store previous orientations for smoothing
         self.orientation_smoothing_factor = 0.15  # Lower = smoother but more lag (0.05-0.3 range)
+        self._map_recovery_warnings = set()
 
         self.robot_prim = None
 
@@ -122,6 +124,14 @@ class HuNavManager:
             self.config = self._load_yaml(config_file_path)
         else:
             self.config = None
+        self.map_free_grid = None
+        self.map_resolution = None
+        self.map_origin = None
+        self.map_yaw = 0.0
+        self.map_width = 0
+        self.map_height = 0
+        self.map_ray_step = 0.05
+        self._load_map_obstacle_grid()
 
         # Define the default character source asset (for animation retargeting)
         self.default_biped_usd = os.path.join(
@@ -132,6 +142,230 @@ class HuNavManager:
         full_path = os.path.join(os.path.dirname(__file__), relative_path)
         with open(full_path, "r") as file:
             return yaml.safe_load(file)
+
+    def _resolve_map_yaml_path(self) -> Optional[Path]:
+        if self.config is None:
+            return None
+
+        params = self.config.get("hunav_loader", {}).get("ros__parameters", {})
+        map_name = params.get("map")
+        if not map_name:
+            return None
+
+        candidates = []
+        env_map = os.environ.get("HUNAV_MAP")
+        if env_map:
+            candidates.append(Path(env_map))
+
+        if self.config_file_path:
+            config_path = Path(self.config_file_path)
+            if config_path.is_absolute():
+                candidates.append(config_path.resolve().parent.parent / "maps" / f"{map_name}.yaml")
+
+        candidates.append(Path(__file__).resolve().parent.parent / "maps" / f"{map_name}.yaml")
+        candidates.append(Path("/workspace/hunav_isaac_ws/src/Hunav_isaac_wrapper/src/maps") / f"{map_name}.yaml")
+
+        for candidate in candidates:
+            if candidate.is_file():
+                return candidate
+        return None
+
+    def _load_map_obstacle_grid(self):
+        map_yaml_path = self._resolve_map_yaml_path()
+        if map_yaml_path is None:
+            print("[HuNavManager] Map obstacle grid disabled: map yaml not found.")
+            return
+
+        try:
+            from PIL import Image
+
+            with open(map_yaml_path, "r") as file:
+                map_meta = yaml.safe_load(file)
+
+            image_path = Path(map_meta["image"])
+            if not image_path.is_absolute():
+                image_path = map_yaml_path.parent / image_path
+
+            image = Image.open(image_path).convert("L")
+            pixels = np.asarray(image, dtype=np.float32)
+
+            negate = int(map_meta.get("negate", 0))
+            if negate == 0:
+                occupancy = (255.0 - pixels) / 255.0
+            else:
+                occupancy = pixels / 255.0
+
+            free_thresh = float(map_meta.get("free_thresh", 0.196))
+            self.map_free_grid = occupancy < free_thresh
+            self.map_resolution = float(map_meta["resolution"])
+            origin = map_meta["origin"]
+            self.map_origin = (float(origin[0]), float(origin[1]))
+            self.map_yaw = float(origin[2]) if len(origin) > 2 else 0.0
+            self.map_height, self.map_width = self.map_free_grid.shape
+            self.map_ray_step = max(self.map_resolution, 0.05)
+
+            free_count = int(np.count_nonzero(self.map_free_grid))
+            total_count = int(self.map_free_grid.size)
+            print(
+                "[HuNavManager] Loaded map obstacle grid "
+                f"{map_yaml_path} ({self.map_width}x{self.map_height}, "
+                f"free={free_count}/{total_count})."
+            )
+        except Exception as exc:
+            self.map_free_grid = None
+            print(f"[HuNavManager] Warning: failed to load map obstacle grid: {exc}")
+
+    def _world_to_map_cell(self, x: float, y: float) -> Tuple[int, int]:
+        ox, oy = self.map_origin
+        dx = x - ox
+        dy = y - oy
+        if abs(self.map_yaw) > 1e-6:
+            c = math.cos(-self.map_yaw)
+            s = math.sin(-self.map_yaw)
+            dx, dy = c * dx - s * dy, s * dx + c * dy
+        return int(math.floor(dx / self.map_resolution)), int(math.floor(dy / self.map_resolution))
+
+    def _map_cell_to_world(self, mx: int, my: int, z: float = 0.0) -> Gf.Vec3d:
+        x = (mx + 0.5) * self.map_resolution
+        y = (my + 0.5) * self.map_resolution
+        if abs(self.map_yaw) > 1e-6:
+            c = math.cos(self.map_yaw)
+            s = math.sin(self.map_yaw)
+            x, y = c * x - s * y, s * x + c * y
+        ox, oy = self.map_origin
+        return Gf.Vec3d(ox + x, oy + y, z)
+
+    def _is_world_point_free(self, x: float, y: float) -> bool:
+        if self.map_free_grid is None:
+            return True
+
+        mx, my = self._world_to_map_cell(x, y)
+        if mx < 0 or my < 0 or mx >= self.map_width or my >= self.map_height:
+            return False
+
+        image_y = self.map_height - 1 - my
+        return bool(self.map_free_grid[image_y, mx])
+
+    def _nearest_free_world_point(
+        self,
+        x: float,
+        y: float,
+        z: float = 0.0,
+        max_search_distance: float = 2.0,
+    ) -> Optional[Gf.Vec3d]:
+        if self.map_free_grid is None:
+            return None
+
+        start_mx, start_my = self._world_to_map_cell(x, y)
+        max_cells = max(1, int(math.ceil(max_search_distance / self.map_resolution)))
+
+        for radius_cells in range(max_cells + 1):
+            best_cell = None
+            best_distance_sq = None
+            for dy in range(-radius_cells, radius_cells + 1):
+                for dx in range(-radius_cells, radius_cells + 1):
+                    if max(abs(dx), abs(dy)) != radius_cells:
+                        continue
+
+                    mx = start_mx + dx
+                    my = start_my + dy
+                    if mx < 0 or my < 0 or mx >= self.map_width or my >= self.map_height:
+                        continue
+
+                    image_y = self.map_height - 1 - my
+                    if not self.map_free_grid[image_y, mx]:
+                        continue
+
+                    distance_sq = dx * dx + dy * dy
+                    if best_distance_sq is None or distance_sq < best_distance_sq:
+                        best_cell = (mx, my)
+                        best_distance_sq = distance_sq
+
+            if best_cell is not None:
+                return self._map_cell_to_world(best_cell[0], best_cell[1], z)
+
+        return None
+
+    def _raycast_map_obstacle(
+        self,
+        agent_position: Gf.Vec3d,
+        direction: Gf.Vec3f,
+        max_distance: float,
+    ) -> Tuple[float, Optional[Gf.Vec3f]]:
+        if self.map_free_grid is None:
+            return max_distance, None
+
+        step = self.map_ray_step
+        dist = step
+        while dist <= max_distance + 1e-6:
+            x = float(agent_position[0]) + float(direction[0]) * dist
+            y = float(agent_position[1]) + float(direction[1]) * dist
+            if not self._is_world_point_free(x, y):
+                return dist, Gf.Vec3f(x, y, float(agent_position[2]) + 0.5)
+            dist += step
+
+        return max_distance, None
+
+    def _motion_stays_in_free_map(self, start_pos: Gf.Vec3d, end_pos: Gf.Vec3d) -> bool:
+        if self.map_free_grid is None:
+            return True
+
+        sx, sy = float(start_pos[0]), float(start_pos[1])
+        ex, ey = float(end_pos[0]), float(end_pos[1])
+        if not self._is_world_point_free(sx, sy):
+            return False
+
+        distance = math.hypot(ex - sx, ey - sy)
+        steps = max(1, int(math.ceil(distance / max(self.map_resolution * 0.5, 0.025))))
+        for i in range(1, steps + 1):
+            t = i / steps
+            x = sx + (ex - sx) * t
+            y = sy + (ey - sy) * t
+            if not self._is_world_point_free(x, y):
+                return False
+        return True
+
+    def _clamp_motion_to_free_map(
+        self,
+        start_pos: Gf.Vec3d,
+        end_pos: Gf.Vec3d,
+    ) -> Tuple[Gf.Vec3d, bool]:
+        if self.map_free_grid is None:
+            return end_pos, False
+
+        sx, sy, sz = float(start_pos[0]), float(start_pos[1]), float(start_pos[2])
+        ex, ey, ez = float(end_pos[0]), float(end_pos[1]), float(end_pos[2])
+
+        if not self._is_world_point_free(sx, sy):
+            recovered = self._nearest_free_world_point(sx, sy, sz)
+            if recovered is not None:
+                return recovered, True
+            return start_pos, True
+
+        if self._motion_stays_in_free_map(start_pos, end_pos):
+            return end_pos, False
+
+        distance = math.hypot(ex - sx, ey - sy)
+        steps = max(1, int(math.ceil(distance / max(self.map_resolution * 0.5, 0.025))))
+        last_free = Gf.Vec3d(sx, sy, sz)
+
+        for i in range(1, steps + 1):
+            t = i / steps
+            candidate = Gf.Vec3d(
+                sx + (ex - sx) * t,
+                sy + (ey - sy) * t,
+                sz + (ez - sz) * t,
+            )
+            if not self._is_world_point_free(float(candidate[0]), float(candidate[1])):
+                return last_free, True
+            last_free = candidate
+
+        return last_free, True
+
+    def _agent_floor_z(self, index: int) -> float:
+        if index < len(self.agent_initial_states):
+            return float(self.agent_initial_states[index]["position"][2])
+        return 0.0
 
     def slerp_quaternions(self, q1: Gf.Quatf, q2: Gf.Quatf, t: float) -> Gf.Quatf:
         """
@@ -339,6 +573,16 @@ class HuNavManager:
             init_pose = agent_cfg["init_pose"]
             # translation
             global_pos = Gf.Vec3d(init_pose["x"], init_pose["y"], init_pose["z"])
+            if not self._is_world_point_free(float(global_pos[0]), float(global_pos[1])):
+                recovered = self._nearest_free_world_point(
+                    float(global_pos[0]), float(global_pos[1]), float(global_pos[2])
+                )
+                if recovered is not None:
+                    self.node.get_logger().warn(
+                        f"Agent {agent_name} init pose is outside the navigation map; "
+                        f"moving it to nearest free cell at ({recovered[0]:.3f}, {recovered[1]:.3f})."
+                    )
+                    global_pos = recovered
 
             h_rad = init_pose.get("h", 0.0)
             h_deg = h_rad * 180.0 / math.pi
@@ -366,6 +610,12 @@ class HuNavManager:
             
             PhysxSchema.PhysxRigidBodyAPI.Apply(container)
             UsdPhysics.RigidBodyAPI.Apply(container)
+            container.CreateAttribute(
+                "physxRigidBody:disableGravity", Sdf.ValueTypeNames.Bool
+            ).Set(True)
+            container.CreateAttribute(
+                "physics:kinematicEnabled", Sdf.ValueTypeNames.Bool
+            ).Set(True)
 
             # Create the inner animated SkelRoot as a child of the container
             anim_path = container_path + "/Animation"
@@ -491,6 +741,14 @@ class HuNavManager:
                     if distance < best_distance:
                         best_distance = distance
                         best_hit = hit.get("position")
+            map_distance, map_hit = self._raycast_map_obstacle(
+                agent_position, direction, max_distance
+            )
+            if map_hit is not None and map_distance < best_distance:
+                hit_found = True
+                best_distance = map_distance
+                best_hit = map_hit
+
             # If at least one hit was found, append the best hit; else, use defaults
             if hit_found:
                 closest_hits.append((best_distance, best_hit))
@@ -606,6 +864,24 @@ class HuNavManager:
 
         # Read transforms
         pos = agent_prim.GetAttribute("xformOp:translate").Get()
+        floor_z = self._agent_floor_z(index)
+        if abs(float(pos[2]) - floor_z) > 1e-4:
+            pos = Gf.Vec3d(float(pos[0]), float(pos[1]), floor_z)
+            agent_prim.GetAttribute("xformOp:translate").Set(pos)
+            agent_prim.GetAttribute("physics:velocity").Set(Gf.Vec3d(0.0, 0.0, 0.0))
+        if not self._is_world_point_free(float(pos[0]), float(pos[1])):
+            recovered = self._nearest_free_world_point(float(pos[0]), float(pos[1]), floor_z)
+            if recovered is not None:
+                warning_key = ("agent_map_recovery", agent_id)
+                if warning_key not in self._map_recovery_warnings:
+                    self.node.get_logger().warn(
+                        f"Agent{agent_id} was outside the navigation map; "
+                        f"moving it to nearest free cell at ({recovered[0]:.3f}, {recovered[1]:.3f})."
+                    )
+                    self._map_recovery_warnings.add(warning_key)
+                agent_prim.GetAttribute("xformOp:translate").Set(recovered)
+                agent_prim.GetAttribute("physics:velocity").Set(Gf.Vec3d(0.0, 0.0, 0.0))
+                pos = recovered
         rot = agent_prim.GetAttribute("xformOp:orient").Get()
         rw = rot.GetReal()
         rx, ry, rz = rot.GetImaginary()
@@ -666,8 +942,8 @@ class HuNavManager:
         
         # SFM parameter configuration constants
         DEFAULT_SFM_PARAMS = {
-            "goal_force_factor": 10.0,
-            "obstacle_force_factor": 2.0,
+            "goal_force_factor": 2.0,
+            "obstacle_force_factor": 10.0,
             "social_force_factor": 5.0
         }
         
@@ -779,11 +1055,15 @@ class HuNavManager:
             char = ag.get_character(str(find_skelroot_path(agent_skelroot_prim)))
 
             # Set position
+            old_pos = agent_prim.GetAttribute("xformOp:translate").Get()
+            floor_z = self._agent_floor_z(idx)
+            old_pos = Gf.Vec3d(float(old_pos[0]), float(old_pos[1]), floor_z)
             new_pos = Gf.Vec3d(
                 upd.position.position.x,
                 upd.position.position.y,
-                upd.position.position.z,
+                floor_z,
             )
+            new_pos, map_clamped = self._clamp_motion_to_free_map(old_pos, new_pos)
             agent_prim.GetAttribute("xformOp:translate").Set(new_pos)
 
             # Set orientation with smoothing
@@ -838,8 +1118,10 @@ class HuNavManager:
             lin = Gf.Vec3d(
                 upd.velocity.linear.x,
                 upd.velocity.linear.y,
-                upd.velocity.linear.z,
+                0.0,
             )
+            if map_clamped:
+                lin = Gf.Vec3d(0.0, 0.0, 0.0)
 
             # Animation orientation correction (use smoothed animation orientation)
             if char:
